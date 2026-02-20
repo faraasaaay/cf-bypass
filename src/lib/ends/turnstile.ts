@@ -15,23 +15,25 @@ async function turnstile({ domain, proxy, siteKey }: TurnstileData, page: any) {
     if (!siteKey) throw new Error("Missing siteKey parameter");
 
     const timeout = (global as any).timeOut || 60000;
-    let isResolved = false;
+    return new Promise(async (resolve, reject) => {
+        let isResolved = false;
 
-    const cl = setTimeout(async () => {
-        if (!isResolved) {
-            throw new Error("Timeout Error");
-        }
-    }, timeout);
+        const cl = setTimeout(() => {
+            if (!isResolved) {
+                isResolved = true;
+                reject(new Error("Timeout Error"));
+            }
+        }, timeout);
 
-    try {
-        if (proxy?.username && proxy?.password) {
-            await page.authenticate({
-                username: proxy.username,
-                password: proxy.password,
-            });
-        }
+        try {
+            if (proxy?.username && proxy?.password) {
+                await page.authenticate({
+                    username: proxy.username,
+                    password: proxy.password,
+                });
+            }
 
-        const htmlContent = `
+            const htmlContent = `
         <div class="turnstile"></div>
         <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" defer></script>
         <script>
@@ -50,63 +52,75 @@ async function turnstile({ domain, proxy, siteKey }: TurnstileData, page: any) {
         </script>
     `;
 
-        await page.setRequestInterception(true);
-        page.removeAllListeners("request");
-        page.on("request", async (request: any) => {
-            const reqUrl = request.url();
-            if ([domain, domain + "/"].includes(reqUrl) && request.resourceType() === "document") {
-                await request.respond({
-                    status: 200,
-                    contentType: "text/html",
-                    body: htmlContent,
-                });
-            } else if (reqUrl.includes("challenges.cloudflare.com/reports/v0/post")) {
-                await request.abort();
-            } else if (reqUrl.includes("challenges.cloudflare.com/turnstile/v0/b/88d68f5d5ea3/api.js")) {
-                const localPath = path.join(__dirname, '../js/api.js');
-                try {
-                    const body = fs.readFileSync(localPath);
+            await page.setRequestInterception(true);
+            page.removeAllListeners("request");
+            page.on("request", async (request: any) => {
+                const reqUrl = request.url();
+                if ([domain, domain + "/"].includes(reqUrl) && request.resourceType() === "document") {
                     await request.respond({
                         status: 200,
-                        contentType: 'application/javascript',
-                        body: body
+                        contentType: "text/html",
+                        body: htmlContent,
                     });
-                } catch (e) {
-                    console.error("Failed to serve local api.js:", e);
+                } else if (reqUrl.includes("challenges.cloudflare.com/reports/v0/post")) {
+                    await request.abort();
+                } else if (reqUrl.includes("challenges.cloudflare.com/turnstile/v0/b/88d68f5d5ea3/api.js")) {
+                    const localPath = path.join(__dirname, '../js/api.js');
+                    try {
+                        const body = fs.readFileSync(localPath);
+                        await request.respond({
+                            status: 200,
+                            contentType: 'application/javascript',
+                            body: body
+                        });
+                    } catch (e) {
+                        console.error("Failed to serve local api.js:", e);
+                        await request.continue();
+                    }
+                } else if (
+                    reqUrl.includes("challenges.cloudflare.com") ||
+                    reqUrl.includes("/cdn-cgi/challenge-platform/")
+                ) {
                     await request.continue();
+                } else {
+                    await request.abort();
                 }
-            } else if (
-                reqUrl.includes("challenges.cloudflare.com") ||
-                reqUrl.includes("/cdn-cgi/challenge-platform/")
-            ) {
-                await request.continue();
-            } else {
-                await request.abort();
+            });
+
+            await page.goto(domain, { waitUntil: "domcontentloaded" });
+
+            await page.waitForSelector('[name="cf-response"]', { timeout });
+
+            const token = await page.evaluate(() => {
+                try {
+                    return document.querySelector('[name="cf-response"]')?.getAttribute('value');
+                } catch {
+                    return null;
+                }
+            });
+
+            if (!token || token.length < 10) {
+                if (!isResolved) {
+                    isResolved = true;
+                    clearTimeout(cl); // Added clearTimeout here
+                    return reject(new Error("Failed to get token"));
+                }
             }
-        });
 
-        await page.goto(domain, { waitUntil: "domcontentloaded" });
-
-        await page.waitForSelector('[name="cf-response"]', { timeout });
-
-        const token = await page.evaluate(() => {
-            try {
-                return document.querySelector('[name="cf-response"]')?.getAttribute('value');
-            } catch {
-                return null;
+            if (!isResolved) {
+                isResolved = true;
+                clearTimeout(cl); // Added clearTimeout here
+                resolve(token);
             }
-        });
 
-        isResolved = true;
-        clearTimeout(cl);
-
-        if (!token || token.length < 10) throw new Error("Failed to get token");
-        return token;
-
-    } catch (e) {
-        clearTimeout(cl);
-        throw e;
-    }
+        } catch (e) {
+            clearTimeout(cl);
+            if (!isResolved) {
+                isResolved = true;
+                reject(e);
+            }
+        }
+    });
 }
 
-export = turnstile;
+export default turnstile;
