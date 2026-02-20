@@ -57,6 +57,8 @@ async function cloudflare(data: CloudflareData, page: any): Promise<any> {
                             await req.continue();
                         }
                     } else if (
+                        req.isNavigationRequest() ||
+                        req.resourceType() === 'document' ||
                         reqUrl === data.domain ||
                         reqUrl.includes("challenges.cloudflare.com") ||
                         reqUrl.includes("/cdn-cgi/challenge-platform/")
@@ -107,4 +109,4 @@ async function cloudflare(data: CloudflareData, page: any): Promise<any> {
     });
 }
 
-export = cloudflare;
+export default cloudflare;
